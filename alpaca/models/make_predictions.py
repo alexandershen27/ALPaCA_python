@@ -208,14 +208,9 @@ def make_predictions(
             print("No lesion candidates detected.")
         return None
 
-    if verbose:
-        print(f"  Shape: {t1.shape}")
-        print(f"  Found {n_lesions} lesion candidates")
-
-
     # ========== [STAGE 2] LOAD MODELS ========== #
     if verbose:
-        print(f"[2/6] Loading {n_models} CV models...")
+        print(f"[2/6] Loading models...")
 
     model_dir = Path(model_dir)
 
@@ -223,11 +218,6 @@ def make_predictions(
         raise FileNotFoundError(f"Model directory not found: {model_dir}")
 
     models_list = []
-
-
-    if verbose:
-        device_name = 'cuda' if torch.cuda.is_available() else 'cpu'
-        print(f"  Using device: {device_name}")
 
     for i in range(1, n_models + 1):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -254,30 +244,29 @@ def make_predictions(
         models_list.append({'encoder': encoder, 'predictor': predictor})
 
 
-    # ========== [STAGE 3] EXTRACT ALL PATCHES ========== #
+   # ========== [STAGE 3] EXTRACT ALL PATCHES ========== #
+    if verbose:
+        print(f"[3/6] Extracting patches...")
 
     all_predictions = np.zeros((n_lesions, N_BIOMARKERS)) 
     all_uncertainties = np.zeros((n_lesions, N_BIOMARKERS))
+    all_model_disagreement = np.zeros((n_lesions, N_BIOMARKERS))  # Track ensemble disagreement
 
     all_patches_list = []
-    lesion_to_patch_idx = []  # Maps lesion_id -> (start_idx, end idx)
+    lesion_to_patch_idx = []  # Maps lesion_id -> (start_idx, end_idx)
 
-    # Batch all patches sequentially in all_patches_list
     current_idx = 0
-    total_patches_extracted = 0
-    approx_total_patches = n_lesions * n_patches 
+    n_skipped = 0
 
     for candidate_id in range(1, n_lesions + 1):
-
         # Find valid patch centers (not on image boundaries)
         valid_coords = get_valid_patch_centers(labeled_candidates, candidate_id)
         n_valid = len(valid_coords)
         
         # Lesion too small or too close to boundary (skip)
         if n_valid == 0: 
-            if verbose:
-                print(f"  WARNING: Skipping lesion {candidate_id}/{n_lesions} (no valid centers)")
             lesion_to_patch_idx.append((current_idx, current_idx))
+            n_skipped += 1
             continue
         
         # Sample patch centers (allow replacement if necessary)
@@ -287,15 +276,15 @@ def make_predictions(
         else:
             n_samples = min(n_patches, n_valid)
             replace = False 
-
+        
         sampled_indices = np.random.choice(n_valid, size=n_samples, replace=replace)
         sampled_centers = valid_coords[sampled_indices]
-
-        # Extract patches and append
+        
+        # Extract patches for this lesion
         for center in sampled_centers:
-
             starts = center - PATCH_RADIUS
             ends = center + PATCH_RADIUS - 1
+            
             patch = extract_patch(
                 candidate_id,
                 starts, ends,
@@ -304,63 +293,69 @@ def make_predictions(
                 rotate_patches=rotate_patches
             )
             all_patches_list.append(patch)
-            total_patches_extracted += 1
-            if verbose:
-                print(f"\r[3/6] Extracted {total_patches_extracted}/{approx_total_patches} patches (lesion {candidate_id}/{n_lesions})...", end="", flush=True)
-    
-        # Record patches for each lesion
+        
+        # Record patch range for this lesion
         lesion_to_patch_idx.append((current_idx, current_idx + len(sampled_centers)))
         current_idx += len(sampled_centers)
-    
+
     # Convert to tensor
     all_patches = torch.stack(all_patches_list).to(device)
     total_patches = all_patches.shape[0]
 
+    if verbose and n_skipped > 0:
+            print(f"  Skipped {n_skipped} lesions (too small or near boundary)")
+
+
     # ========== [STAGE 4] RUN BATCH THROUGH MODELS ========== #
+    if verbose:
+        print(f"[4/6] Running inference...")
 
     all_model_predictions = []
 
     with torch.no_grad():
-        for model_idx, model in enumerate(models_list, 1):
-            if verbose:
-                print(f"\r[4/6] Running model {model_idx}/{n_models}...", end="", flush=True)
+        for model in models_list:
             
             encoder = model['encoder']
             predictor = model['predictor']
-
+            
             encoded = encoder(all_patches)
             predictions = predictor(encoded)
             all_model_predictions.append(predictions)
 
+    # Stack: [n_models, n_patches, n_biomarkers] -> [n_patches, n_models, n_biomarkers]
     all_model_predictions = torch.stack(all_model_predictions).transpose(0, 1)
 
     # Aggregate per patch
-    mean_per_patch = all_model_predictions.mean(dim=1)
-    std_per_patch = all_model_predictions.std(dim=1)
+    mean_per_patch = all_model_predictions.mean(dim=1)  
+    std_per_patch = all_model_predictions.std(dim=1)   
 
     # Map back to lesions
     for candidate_id in range(1, n_lesions + 1):
         start_idx, end_idx = lesion_to_patch_idx[candidate_id - 1]
-        n_p = end_idx - start_idx  # num of patches for current lesion
-
+        n_p = end_idx - start_idx  # number of patches for current lesion
+        
         if n_p == 0:
+            # Skipped lesion
             all_predictions[candidate_id - 1] = [0, 0, 0]
             all_uncertainties[candidate_id - 1] = [0, 0, 0]
+            all_model_disagreement[candidate_id - 1] = [0, 0, 0]
         else:
+            # Get patch-level ensemble means for this lesion
             lesion_patch_means = mean_per_patch[start_idx:end_idx]
+            
+            # Final prediction: mean across patches
             all_predictions[candidate_id - 1] = lesion_patch_means.mean(dim=0).cpu().numpy()
+            
+            # Uncertainty: std across patches (measures spatial heterogeneity)
             all_uncertainties[candidate_id - 1] = lesion_patch_means.std(dim=0).cpu().numpy()
-
-
-
-    # Report skipped
-    n_skipped = np.sum((all_predictions[:, 0] == 0) & (all_uncertainties[:, 0] == 0))
-    if verbose and n_skipped > 0:
-        print(f"  NOTE: Skipped {n_skipped}/{n_lesions} lesions (no valid patch centers)")
+            
+            # Model disagreement (measures ensemble uncertainty)
+            lesion_patch_model_stds = std_per_patch[start_idx:end_idx]
+            all_model_disagreement[candidate_id - 1] = lesion_patch_model_stds.mean(dim=0).cpu().numpy()
 
     # ========== [STAGE 5] THRESHOLD TO BINARY PREDICTIONS ========== #
     if verbose:
-        print(f"\n[5/6] Applying thresholds...")
+        print(f"[5/6] Applying thresholds...")
 
     lesion_thresh = THRESHOLDS['lesion'][lesion_priority]
     prl_thresh = THRESHOLDS['prl'][prl_priority]
@@ -433,6 +428,13 @@ def make_predictions(
         'cvs_std': all_uncertainties[:, 2]
     })
 
+    disagreements_df = pd.DataFrame({
+        'lesion_id': range(1, n_lesions + 1),
+        'lesion_disagreement': all_model_disagreement[:, 0],
+        'prl_disagreement': all_model_disagreement[:, 1],
+        'cvs_disagreement': all_model_disagreement[:, 2]
+    })
+
     # Save outputs
     if save_outputs:
         output_dir = Path(output_dir)
@@ -454,7 +456,8 @@ def make_predictions(
         predictions_df.to_csv(output_dir / 'predictions.csv', index=False)
         probabilities_df.to_csv(output_dir / 'probabilities.csv', index=False)
         uncertainties_df.to_csv(output_dir / 'uncertainties.csv', index=False)
-
+        disagreements_df.to_csv(output_dir / 'model_disagreement.csv', index=False)
+        
         if probability_maps is not None:
             for name, prob_map in probability_maps.items():
                 prob_nii = nib.Nifti1Image(prob_map, affine=affine, header=header)
@@ -462,16 +465,24 @@ def make_predictions(
 
         if verbose:
             print(f"[Done] Results saved to {output_dir}")
-            print(f"  Lesions: {predictions_df['lesion'].sum()}")
-            print(f"  PRLs   : {predictions_df['prl'].sum()}")
-            print(f"  CVSs   : {predictions_df['cvs'].sum()}")
+
+        if verbose:
+            print("\n┌" + "─"*38 + "┐")
+            print("│" + " Lesion Inference ".center(38) + "│")
+            print("└" + "─"*38 + "┘")   
+            print(f"  Total Lesions      : {predictions_df['lesion'].sum()}")
+            print(f"  Lesions only       : {np.sum(lesion_codes == 1)}")
+            print(f"  Lesions + PRL      : {np.sum(lesion_codes == 3)}")
+            print(f"  Lesions + CVS      : {np.sum(lesion_codes == 5)}")
+            print(f"  Lesions + PRL + CVS: {np.sum(lesion_codes == 7)}")
 
     # Return results
     results = {
         'mask': output_mask,
         'predictions': predictions_df,
         'probabilities': probabilities_df,
-        'uncertainties': uncertainties_df
+        'uncertainties': uncertainties_df,
+        'disagreements': disagreements_df
     }
 
     if probability_maps is not None:
