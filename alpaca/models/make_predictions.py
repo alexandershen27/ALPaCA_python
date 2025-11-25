@@ -156,7 +156,7 @@ def make_predictions(
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(random_seed)
         if verbose:
-            print(f"  Random seed set to: {random_seed}")
+            print(f"Random seed set to: {random_seed}")
 
     # ========== [STAGE 1] LOAD AND VALIDATE INPUT ========== #
     if verbose:
