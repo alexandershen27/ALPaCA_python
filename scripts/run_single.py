@@ -11,13 +11,11 @@ Two modes:
         --epi /path/to/epi_mag.nii.gz \
         --phase /path/to/epi_phase.nii.gz \
         --labels /path/to/lesion_labels.nii.gz \
-        --model-dir /path/to/models \
         --output /path/to/output
 
 2. Auto-detect:
     python scripts/run_single.py \
         --subject-dir /path/to/subject/session_date \
-        --model-dir /path/to/models \
         --output /path/to/output
         
     Looks for files matching these patterns:
@@ -101,13 +99,15 @@ def main():
     parser.add_argument('--phase', help='EPI phase image (unwrapped)')
     parser.add_argument('--labels', help='Labeled lesion candidates')
     parser.add_argument('--eroded-labels', help='Pre-eroded labels (optional)')
+
     
     # Required for both modes
-    parser.add_argument('--model-dir', required=True, 
-                       help='Directory with model weights')
+    parser.add_argument('--model-dir', default=None, 
+                       help='Directory with model weights (default ALPaCA_python/models)')
     parser.add_argument('--output', required=True,
                        help='Output directory')
-    
+    parser.add_argument('--skip-erosion', action='store_true')
+
     # Inference options
     parser.add_argument('--n-patches', type=int, default=20,
                        help='Number of patches per lesion (default: 20)')
@@ -197,7 +197,7 @@ def main():
         print(f"Error: eroded-labels file not found: {eroded_path}")
         sys.exit(1)
     
-    if not Path(args.model_dir).exists():
+    if args.model_dir and not Path(args.model_dir).exists():
         print(f"Error: Model directory not found: {args.model_dir}")
         sys.exit(1)
     
@@ -212,6 +212,7 @@ def main():
         phase_path=phase_path,
         labels_path=labels_path,
         eroded_candidates_path=eroded_path,
+        skip_erosion=args.skip_erosion,
         output_dir=str(output_dir / "preprocessed"),
         verbose=verbose
     )

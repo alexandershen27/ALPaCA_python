@@ -44,8 +44,8 @@ def extract_patch(candidate_id, patch_starts, patch_ends,
     isolation_mask = 0.1 + 0.9 * (is_background | is_target).astype(np.float32)
 
     # EPI isolation mask (zeros out non-target, emphasizes interior for CVS)
-    epi_mask = ((lesion_mask == candidate_id) +
-                (eroded_mask == candidate_id)).astype(np.float32)
+    epi_mask = ((lesion_mask == candidate_id).astype(np.float32) +
+                (eroded_mask == candidate_id).astype(np.float32))
     
     # Extract and mask patches
     t1_patch = t1[s[0]:e[0]+1, s[1]:e[1]+1, s[2]:e[2]+1] * isolation_mask

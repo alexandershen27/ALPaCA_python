@@ -60,6 +60,7 @@ def minimal_preprocess(
     labels_path: str, 
     output_dir: str, 
     eroded_candidates_path: str = None,
+    skip_erosion: bool = False,
     verbose: bool = True
 ):
     """Minimal preprocessing: normalize images and erode lesion labels."""
@@ -89,47 +90,35 @@ def minimal_preprocess(
     labels = labels_nii.get_fdata().astype(np.int32)
     
     # [2/4] Normalize images
-    if verbose:
-        print("[2/4] Normalizing modalities")
     
     # Check if already normalized before computing masks
     if is_normalized(t1):
         if verbose:
-            print("  T1    : Already normalized")
+            print("[2/4] Already normalized")
         t1_norm = t1
-    else:
-        t1_norm = normalize_image(t1, t1 > 0)
-    
-    if is_normalized(flair):
-        if verbose:
-            print("  FLAIR : Already normalized")
         flair_norm = flair
-    else:
-        flair_norm = normalize_image(flair, flair > 0)
-    
-    if is_normalized(epi):
-        if verbose:
-            print("  EPI   : Already normalized")
         epi_norm = epi
-    else:
-        epi_norm = normalize_image(epi, epi > 0)
-    
-    if is_normalized(phase):
-        if verbose:
-            print("  Phase : Already normalized")
         phase_norm = phase
     else:
+        if verbose:
+            print("[2/4] Normalizing modalities")
+        t1_norm = normalize_image(t1, t1 > 0)
+        flair_norm = normalize_image(flair, flair > 0)
+        epi_norm = normalize_image(epi, epi > 0)
         phase_norm = normalize_image(phase, phase > 0)
 
     # [3/4] Erode labels
-    if eroded_candidates_path is not None:
-        if verbose:
-            print("[3/4] Eroded candidates provided")
-        eroded = nib.load(eroded_candidates_path).get_fdata().astype(np.int16)
+    if skip_erosion:
+        print("[3/4] Skipping erosion")
     else:
-        if verbose:
-            print("[3/4] Eroding lesion candidates")
-        eroded = erode_labels(labels, iterations=1)
+        if eroded_candidates_path is not None:
+            if verbose:
+                print("[3/4] Eroded candidates provided")
+            eroded = nib.load(eroded_candidates_path).get_fdata().astype(np.int16)
+        else:
+            if verbose:
+                print("[3/4] Eroding lesion candidates")
+            eroded = erode_labels(labels, iterations=1)
     
     # [4/4] Save preprocessed files
     if verbose:
@@ -141,16 +130,21 @@ def minimal_preprocess(
     phase_out = output_dir / "phase_final.nii.gz"
     labels_out = output_dir / "labeled_candidates.nii.gz"
     eroded_out = output_dir / "eroded_candidates.nii.gz"
+
+    if skip_erosion:
+        eroded_out = labels_out
     
     nib.save(nib.Nifti1Image(t1_norm, t1_nii.affine, t1_nii.header), t1_out)
     nib.save(nib.Nifti1Image(flair_norm, flair_nii.affine, flair_nii.header), flair_out)
     nib.save(nib.Nifti1Image(epi_norm, epi_nii.affine, epi_nii.header), epi_out)
     nib.save(nib.Nifti1Image(phase_norm, phase_nii.affine, phase_nii.header), phase_out)
     nib.save(nib.Nifti1Image(labels, labels_nii.affine, labels_nii.header), labels_out)
-    nib.save(nib.Nifti1Image(eroded.astype(np.int16), labels_nii.affine, labels_nii.header), eroded_out)
+
+    if not skip_erosion:
+        nib.save(nib.Nifti1Image(eroded.astype(np.int16), labels_nii.affine, labels_nii.header), eroded_out)
     
     if verbose:
-        print("[Done] Ready for inference")
+        print(f"[Done] Results saved to {output_dir}")
     
     return {
         't1': str(t1_out),
