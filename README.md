@@ -9,8 +9,6 @@ This is a Python port of [ALPaCA](https://github.com/hufengling/ALPaCA) (Hu et a
 ## Notes
 
 - Requires pre-trained models from the original R package
-- Assumes images are already co-registered and skull-stripped
 - `minimal_preprocess.py` does basic normalization and erosion
 
-## License
-MIT
+MIT License
